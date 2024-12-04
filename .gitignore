@@ -1,0 +1,5 @@
+Manifest.toml
+src/.ipynb_checkpoints/
+nohup.out
+*.csv
+data/
