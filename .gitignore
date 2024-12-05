@@ -3,3 +3,5 @@ src/.ipynb_checkpoints/
 nohup.out
 *.csv
 data/
+src/LLMMSBM_benchmark.jl
+src/LNMMSBM_functions.jl

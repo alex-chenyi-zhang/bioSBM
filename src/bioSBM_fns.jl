@@ -34,10 +34,10 @@ function ELBO_gauss(ϕ::Array{Float64, 3}, λ, ν::Array{Float64, 3},
         #break
     end
 
-    for j in 1:N
+    @views for j in 1:N
         for i in 1:N
             if i != j
-                apprELBO += dot(ϕ[i,j,:],λ[:,i])# vcat(λ[:,i], 1.0)) #third term
+                apprELBO += dot(ϕ[i,j,:],λ[:,i])
             end
         end
     end
@@ -46,10 +46,8 @@ function ELBO_gauss(ϕ::Array{Float64, 3}, λ, ν::Array{Float64, 3},
         #break
     end
 
+    theta = zeros(K)
     for i in 1:N
-        theta = zeros(K)
-        #theta .= exp.(λ[:,i])  #exp.(vcat(λ[:,i], 1.0))
-        #theta /= sum(theta)
         theta .= softmax(λ[:,i])
         # second line of the expression above
         apprELBO -= (N-1) * ( (log(sum(exp.(λ[:,i])))) + 0.5*tr((diagm(theta) .- theta * theta')*ν[:,:,i]) )
@@ -62,12 +60,14 @@ function ELBO_gauss(ϕ::Array{Float64, 3}, λ, ν::Array{Float64, 3},
     end
     #println("Partial ELBO: ", apprELBO)
     #likelihood term
+    inv_like_var = 0.5 ./ like_var;
+    log_like_var = 0.5 .* log.(like_var);
+
     for i in 1:N
         for j in 1:i-1
             for k in 1:K
                 for g in 1:K
-                    #logP = -(0.5*(Y[i,j] - B[k,g])^2)/like_var[1] -0.5*log(like_var[1])
-                    logP = -(0.5*(Y[i,j] - B[k,g])^2)/like_var[k,g] -0.5*log(like_var[k,g])
+                    logP = (-(Y[i,j] - B[k,g])^2 * inv_like_var[k,g] - log_like_var[k,g]) 
                     apprELBO += ϕ[i,j,k]*ϕ[j,i,g]*logP
                 end
             end
@@ -96,30 +96,20 @@ function f(η_i::Array{Float64, 1}, ϕ_i::Array{Float64, 1}, inv_Σ::Array{Float
     #f = 0.5 * dot(η_i .- μ_i, inv_Σ, η_i .- μ_i) - dot(η_i, ϕ_i) +(N-1)*log(sum(exp.(η_i)))
     f = 0.5 * dot(η_i .- μ_i, inv_Σ, η_i .- μ_i) - dot(η_i, ϕ_i) +(N-1)*log(sum(exp.(η_i)))
 
-    #MMM = Matrix(1.0I, length(inv_Σ[1,:]), length(inv_Σ[1,:]))
-    #f = 0.1 * 0.5 * dot(η_i .- μ_i, η_i .- μ_i) - dot(η_i, ϕ_i) +(N-1)*log(sum(exp.(η_i)))
-
-    #f = 0.5 * dot(η_i .- μ_i, inv_Σ, η_i .- μ_i) - dot(η_i, ϕ_i)/(N-1) +log(sum(exp.(η_i)))
     return f
 end
 
+# gradient of f
 function gradf!(G, η_i::Array{Float64, 1}, ϕ_i::Array{Float64, 1}, inv_Σ::Array{Float64, 2}, μ_i, N::Int)
     G .= softmax(η_i)*(N-1) .- ϕ_i .+ inv_Σ*(η_i .- μ_i)
 
-    #MMM = Matrix(1.0I, length(inv_Σ[1,:]), length(inv_Σ[1,:]))
-    #G .= softmax(η_i)*(N-1) .- ϕ_i .+ 0.1 * (η_i .- μ_i)
-    #G .= exp.(η_i)/sum(exp.(η_i))*(N-1) .- ϕ_i .+ inv_Σ*(η_i .- μ_i)
-    #G .= exp.(η_i)/sum(exp.(η_i)) .- ϕ_i/(N-1) .+ inv_Σ*(η_i .- μ_i)
 end
 
+# Hessian of f
 function hessf!(H, η_i::Array{Float64, 1}, inv_Σ::Array{Float64, 2}, μ_i, N::Int)
     #theta = exp.(η_i)/sum(exp.(η_i))
     theta = softmax(η_i)
     H .=  (N-1)*(diagm(theta) .- theta*theta') .+ inv_Σ
-
-    #MMM = Matrix(1.0I, length(inv_Σ[1,:]), length(inv_Σ[1,:]))
-    #H .=  (N-1)*(diagm(theta) .- theta*theta') .+ 0.1 * MMM
-    #H .=  (diagm(theta) .- theta*theta') .+ inv_Σ
 end
 
 
@@ -130,8 +120,8 @@ function Estep_logitNorm!(ϕ::Array{Float64, 3}, λ, ν::Array{Float64, 3},
     G = zeros(K)
     H = zeros(K,K)
     for i in 1:N
-        ϕ_i = sum(ϕ[i,:,:],dims=1)[1,:]
-        μ_i = μ[:,i]
+        ϕ_i = sum(@view(ϕ[i,:,:]),dims=1)[1,:]
+        μ_i = @view μ[:,i]
         res = optimize(η_i -> f(η_i, ϕ_i, inv_Σ, μ_i, N), (G, η_i) -> gradf!(G,η_i, ϕ_i, inv_Σ, μ_i, N), randn(K), BFGS(linesearch = LineSearches.BackTracking(order=2)))#BFGS())
         η_i = Optim.minimizer(res)
         hessf!(H, η_i, inv_Σ, μ_i, N)
@@ -191,7 +181,7 @@ function Mstep_blockmodel_gauss_multi!(ϕ::Vector{Array{Float64, 3}}, B::Array{F
     learn_r = 0.1
     cum_den = 0.
     for k in 1:K
-        for g in 1:K
+        for g in 1:k  ###  !!! small k
             num_gauss = 0.
             num = 0.
             den = 0.
@@ -211,6 +201,8 @@ function Mstep_blockmodel_gauss_multi!(ϕ::Vector{Array{Float64, 3}}, B::Array{F
             B[k,g] =  (1-learn_r)*B[k,g] + learn_r*num/(den)
             #cum_den += den
             like_var[k,g] =  (1-learn_r)*like_var[k,g] + learn_r*num_gauss/(den)
+            B[g,k] = B[k,g]
+            like_var[g,k] = like_var[k,g]
         end
     end
 
@@ -218,45 +210,6 @@ function Mstep_blockmodel_gauss_multi!(ϕ::Vector{Array{Float64, 3}}, B::Array{F
 
 end
 
-function Mstep_blockmodel_gauss_multi_opt!(ϕ::Vector{Array{Float64, 3}}, B::Array{Float64, 2}, like_var::Array{Float64, 2},
-    Y::Vector{Array{Float64, 2}}, Ns::Array{Int,1}, K::Int, n_regions::Int)
-    
-    learn_r = 0.1  # Learning rate
-    
-    # Preallocate temporary variables outside loops
-    for k in 1:K
-        for g in 1:K
-            num = 0.0
-            den = 0.0
-            num_gauss = 0.0
-            
-            for i_region in 1:n_regions
-                ϕ_region = ϕ[i_region]  # Avoid repeated indexing
-                Y_region = Y[i_region]
-                Ns_region = Ns[i_region]
-                
-                for j in 1:Ns_region
-                    for i in 1:Ns_region
-                        phi_prod = ϕ_region[i, j, k] * ϕ_region[j, i, g]
-                        
-                        # Update accumulators for numerator, denominator, and variance
-                        y_val = Y_region[i, j]
-                        diff = y_val - B[k, g]
-                        num += phi_prod * y_val
-                        den += phi_prod
-                        num_gauss += phi_prod * diff^2
-                    end
-                end
-            end
-            
-            # Update parameters using accumulated values
-            if den > 0
-                B[k, g] = (1 - learn_r) * B[k, g] + learn_r * (num / den)
-                like_var[k, g] = (1 - learn_r) * like_var[k, g] + learn_r * (num_gauss / den)
-            end
-        end
-    end
-end
 
 
 
@@ -279,14 +232,16 @@ function run_VEM_gauss_NN!(n_iterations::Int, ϕ::Vector{Array{Float64, 3}}, λ,
         Ncum += Ns[i_region]
     end
 
-    elbows = zeros(n_regions, n_iterations)
+    ### elbows = zeros(n_regions, n_iterations)
+    n_skip = 10
+    elbows = zeros(n_regions, div(n_iterations,n_skip)+1)
     det_Sigma = zeros(n_iterations)
     #det_nu = [zeros(N, n_iterations) for i_reg in 1:n_regions]
     # opt = ADAM(0.01) #the value in the brackets is
     opt = Descent(0.01)
     #################################
     # definition of the loss functional to be used to optimize the flux model
-    L(a,b) = (Flux.Losses.kldivergence(softmax(Γ(a)), softmax(b)))
+    L(a,b) = (Flux.Losses.kldivergence(softmax(Γ(a)), b))
 
     #################################
 
@@ -301,8 +256,9 @@ function run_VEM_gauss_NN!(n_iterations::Int, ϕ::Vector{Array{Float64, 3}}, λ,
             Estep_logitNorm!(ϕ[i_region], @view(λ[:,N_s[i_region]:N_e[i_region]]), ν[i_region], inv_Σ, Float64.(μ[:,N_s[i_region]:N_e[i_region]]), Ns[i_region], K)
 
             n_flux = 30
+            softmax_lamb = softmax(λ)
             for i_flux in 1:n_flux
-                gs = gradient(()-> L(Float32.(X), Float32.(λ)), ps)
+                gs = gradient(()-> L(X, softmax_lamb), ps)
                 Flux.Optimise.update!(opt, ps, gs)
             end
 
@@ -325,12 +281,15 @@ function run_VEM_gauss_NN!(n_iterations::Int, ϕ::Vector{Array{Float64, 3}}, λ,
         
         
         Mstep_blockmodel_gauss_multi!(ϕ, B, like_var, Y, Ns, K, n_regions)
-
-        for i_region in 1:n_regions
-            # elbows[i_region, i_iter] = -R*Ns[i_region]*tr(Σ) + ELBO_gauss(ϕ[i_region], λ[:,N_s[i_region]:N_e[i_region]], ν[i_region], Σ, B, μ[:,N_s[i_region]:N_e[i_region]],  Y[i_region], K, Ns[i_region], like_var)
-            elbows[i_region, i_iter] = 1
-            if isnan(elbows[i_region, i_iter])
-                break
+        println("iter num: ", i_iter, "\n")
+        if i_iter == 1 || i_iter % n_skip == 0
+            for i_region in 1:n_regions
+                elbows[i_region, div(i_iter,n_skip)+1] = -R*Ns[i_region]*tr(Σ) + ELBO_gauss(ϕ[i_region], λ[:,N_s[i_region]:N_e[i_region]], ν[i_region], Σ, B, μ[:,N_s[i_region]:N_e[i_region]],  Y[i_region], K, Ns[i_region], like_var)
+                # elbows[i_region, i_iter] = 1
+                println("region: ", i_region," ELBO  \n", elbows[i_region,div(i_iter,n_skip)+1])
+                if isnan(elbows[i_region, div(i_iter,n_skip)+1])
+                    break
+                end
             end
         end
         det_Sigma[i_iter] = det(Σ)

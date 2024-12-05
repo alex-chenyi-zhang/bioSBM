@@ -3,10 +3,10 @@ using BenchmarkTools
 
 n_iter = 20
 n_runs = 2
-covariate_file_names = "data/GM12878_input_files/X_files_GM12878.txt"
-map_file_names = "data/GM12878_input_files/Y_files_GM12878.txt"
+covariate_file_names = "data/GM12878_input_files/X_files_GM12878_chr1_100k.txt"
+map_file_names = "data/GM12878_input_files/Y_files_GM12878_chr1_100k.txt"
 
-K = 10
+K = 12
 R = 0.1
 
 
