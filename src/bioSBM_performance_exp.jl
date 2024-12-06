@@ -6,8 +6,8 @@ n_iter = 20
 n_runs = 2
 
 covariate_file_names = 
-covariate_file_names = "data/GM12878_input_files_old/X_files_GM12878.txt"
-map_file_names = "data/GM12878_input_files_old/Y_files_GM12878.txt"
+covariate_file_names = "data/GM12878_input_files/X_files_GM12878_even_100k.txt"
+map_file_names = "data/GM12878_input_files/Y_files_GM12878_even_100k.txt"
 
 K = 10
 R = 0.1
@@ -178,7 +178,9 @@ function Estep_multinomial_gauss_opt!(ϕ::Array{Float64, 3}, λ, B::Array{Float6
 end
 
 
-@time Estep_multinomial_gauss_opt!(ϕ[i_region], @view(λ[:,N_starts[i_region]:N_ends[i_region]]), B, Y[i_region], Ns[i_region], K, like_var)
+@time for i in 1:20
+    Estep_multinomial_gauss_opt!(ϕ[i_region], @view(λ[:,N_starts[i_region]:N_ends[i_region]]), B, Y[i_region], Ns[i_region], K, like_var)
+end
 
 #@time Estep_multinomial_gauss!(ϕ[i_region], @view(λ[:,N_starts[i_region]:N_ends[i_region]]), B, Y[i_region], Ns[i_region], K, like_var)
 
@@ -227,8 +229,7 @@ end
 @time Mstep_blockmodel_gauss_multi!(ϕ, B, like_var, Y, Ns, K, n_regions)
 
 
-Γ   = Dense(P => K)
-Γ = f64(Γ)
+Γ   = Dense(P => K) |> f64
 println("Linear model!!!")
 ps  = Flux.params(Γ)
 # opt = ADAM(0.01) #the value in the brackets is
@@ -241,8 +242,14 @@ n_flux = 30
 
 softmax_lamb = softmax(λ)
 
-@btime for i_flux in 1:n_flux
-    gs = gradient(()-> L(X, softmax_lamb), ps)
+# Compute gradients
+function compute_gradients()
+    return gradient(()-> L(X, softmax_lamb), ps)
+end
+
+@time for i_flux in 1:n_flux
+    #gs = gradient(()-> L(X, softmax_lamb), ps)
+    gs = compute_gradients()
     Flux.Optimise.update!(opt, ps, gs)
 end
 
@@ -256,203 +263,5 @@ end
 
 
 
-function f(η_i::Array{Float64, 1}, ϕ_i::Array{Float64, 1}, inv_Σ::Array{Float64, 2}, μ_i, N::Int)
-    #f = 0.5 * dot(η_i .- μ_i, inv_Σ, η_i .- μ_i) - dot(η_i, ϕ_i) +(N-1)*log(sum(exp.(η_i)))
-    f = 0.5 * dot(η_i .- μ_i, inv_Σ, η_i .- μ_i) - dot(η_i, ϕ_i) +(N-1)*log(sum(exp.(η_i)))
-
-    return f
-end
-
-# gradient of f
-function gradf!(G, η_i::Array{Float64, 1}, ϕ_i::Array{Float64, 1}, inv_Σ::Array{Float64, 2}, μ_i, N::Int)
-    G .= softmax(η_i)*(N-1) .- ϕ_i .+ inv_Σ*(η_i .- μ_i)
-
-end
-
-# Hessian of f
-function hessf!(H, η_i::Array{Float64, 1}, inv_Σ::Array{Float64, 2}, μ_i, N::Int)
-    #theta = exp.(η_i)/sum(exp.(η_i))
-    theta = softmax(η_i)
-    H .=  (N-1)*(diagm(theta) .- theta*theta') .+ inv_Σ
-end
 
 
-################################################################################
-# Function that perform the variational optimization
-function Estep_logitNorm!(ϕ::Array{Float64, 3}, λ, ν::Array{Float64, 3},
-    inv_Σ::Array{Float64, 2}, μ, N::Int, K::Int)
-    G = zeros(K)
-    H = zeros(K,K)
-    for i in 1:N
-        ϕ_i = sum(@view(ϕ[i,:,:]),dims=1)[1,:]
-        μ_i = @view μ[:,i]
-        res = optimize(η_i -> f(η_i, ϕ_i, inv_Σ, μ_i, N), (G, η_i) -> gradf!(G,η_i, ϕ_i, inv_Σ, μ_i, N), randn(K), BFGS(linesearch = LineSearches.BackTracking(order=2)))#BFGS())
-        η_i = Optim.minimizer(res)
-        hessf!(H, η_i, inv_Σ, μ_i, N)
-        λ[:,i] .= η_i
-        ν[:,:,i] .= Hermitian(inv(H))
-        # ν[:,:,i] .= Hermitian(H \ I)
-    end
-end
-
-Ncum = 0
-N_s = ones(Int, n_regions)
-N_e = ones(Int, n_regions)
-for i_region in 1:n_regions
-    N_s[i_region] = Ncum + 1
-    N_e[i_region] = Ncum + Ns[i_region]
-    Ncum += Ns[i_region]
-end
-
-@btime for i_region in 1:n_regions
-    Estep_logitNorm!(ϕ[i_region], @view(λ[:,N_s[i_region]:N_e[i_region]]), ν[i_region], inv_Σ, Float64.(μ[:,N_s[i_region]:N_e[i_region]]), Ns[i_region], K)
-end
-
-########################################
-
-function ELBO_gauss(ϕ::Array{Float64, 3}, λ, ν::Array{Float64, 3},
-    Σ::Array{Float64, 2}, B::Array{Float64, 2}, μ, Y::Array{Float64, 2}, K::Int, N::Int, like_var::Array{Float64, 2})
-    apprELBO = 0.0
-    inv_Σ = inv(Σ)
-    #inv_Σ = Matrix(1.0I, length(Σ[1,:]), length(Σ[1,:]))
-    apprELBO = 0.5 * N * log(det(inv_Σ))
-    for i in 1:N
-        apprELBO -= 0.5 * (dot(λ[:,i] .- μ[:,i], inv_Σ, λ[:,i] .- μ[:,i]) + tr(inv_Σ*ν[:,:,i])) #first 2 terms
-    end
-
-    if isnan(apprELBO)
-        println("ERROR 1")
-        #break
-    end
-
-    for k in 1:K
-        for j in 1:N
-            for i in 1:N
-                if i != j && ϕ[i,j,k] > eps()
-                    apprELBO -= ϕ[i,j,k]*log(ϕ[i,j,k]) #last entropic term
-                end
-            end
-        end
-    end
-    if isnan(apprELBO)
-        println("ERROR 2")
-        #break
-    end
-
-    @views for j in 1:N
-        for i in 1:N
-            if i != j
-                apprELBO += dot(ϕ[i,j,:],λ[:,i])# vcat(λ[:,i], 1.0)) #third term
-            end
-        end
-    end
-    if isnan(apprELBO)
-        println("ERROR 3")
-        #break
-    end
-
-    theta = zeros(K)
-    for i in 1:N
-        #theta .= exp.(λ[:,i])  #exp.(vcat(λ[:,i], 1.0))
-        #theta /= sum(theta)
-        theta .= softmax(λ[:,i])
-        # second line of the expression above
-        apprELBO -= (N-1) * ( (log(sum(exp.(λ[:,i])))) + 0.5*tr((diagm(theta) .- theta * theta')*ν[:,:,i]) )
-        #gaussian entropic term
-        apprELBO += 0.5*log(det(ν[:,:,i]))
-    end
-    if isnan(apprELBO)
-        println("ERROR 4")
-        #break
-    end
-    #println("Partial ELBO: ", apprELBO)
-    #likelihood term
-    inv_like_var = 0.5 ./ like_var;
-    log_like_var = 0.5 .* log.(like_var);
-
-    for i in 1:N
-        for j in 1:i-1
-            for k in 1:K
-                for g in 1:K
-                    logP = (-((Y[i,j] - B[k,g])^2) * inv_like_var[k,g] - log_like_var[k,g]) #* ϕ[i,j,k]*ϕ[j,i,g]
-                    apprELBO += ϕ[i,j,k]*ϕ[j,i,g]*logP
-                end
-            end
-        end
-    end
-    #apprELBO += -0.25*N*(N-1)*log(like_var[1])
-    if isnan(apprELBO)
-        println("ERROR 5")
-        #break
-    end
-    return apprELBO
-end
-
-
-i_region = 1
-@btime ELBO_gauss(ϕ[i_region], λ[:,N_s[i_region]:N_e[i_region]], ν[i_region], Σ, B, μ[:,N_s[i_region]:N_e[i_region]],  Y[i_region], K, Ns[i_region], like_var)
-
-
-
-function ELBO_part(ϕ::Array{Float64, 3}, λ, ν::Array{Float64, 3},
-    Σ::Array{Float64, 2}, B::Array{Float64, 2}, μ, Y::Array{Float64, 2}, K::Int, N::Int, like_var::Array{Float64, 2})
-    apprELBO = 0.0
-    inv_Σ = inv(Σ)
-    #inv_Σ = Matrix(1.0I, length(Σ[1,:]), length(Σ[1,:]))
-    apprELBO = 0.5 * N * log(det(inv_Σ))
-    # for i in 1:N
-    #     apprELBO -= 0.5 * (dot(λ[:,i] .- μ[:,i], inv_Σ, λ[:,i] .- μ[:,i]) + tr(inv_Σ*ν[:,:,i])) #first 2 terms
-    # end
-
-    
-    for k in 1:K
-        for j in 1:N
-            for i in 1:N
-                if i != j && ϕ[i,j,k] > eps()
-                    apprELBO -= ϕ[i,j,k]*log(ϕ[i,j,k]) #last entropic term
-                end
-            end
-        end
-    end
-  
-
-    # @views for j in 1:N
-    #     for i in 1:N
-    #         if i != j
-    #             apprELBO += dot(ϕ[i,j,:],λ[:,i])
-    #         end
-    #     end
-    # end
- 
-    # theta = zeros(K)
-    # for i in 1:N
-    #     theta .= softmax(λ[:,i])
-    #     # second line of the expression above
-    #     apprELBO -= (N-1) * ( (log(sum(exp.(λ[:,i])))) + 0.5*tr((diagm(theta) .- theta * theta')*ν[:,:,i]) )
-    #     #gaussian entropic term
-    #     apprELBO += 0.5*log(det(ν[:,:,i]))
-    # end
- 
-    #likelihood term
-    #println("Partial ELBO: ", apprELBO)
-    #likelihood term
-    # inv_like_var = 0.5 ./ like_var;
-    # log_like_var = 0.5 .* log.(like_var);
-
-    # for i in 1:N
-    #     for j in 1:i-1
-    #         for k in 1:K
-    #             for g in 1:K
-    #                 logP = (-((Y[i,j] - B[k,g])^2) * inv_like_var[k,g] - log_like_var[k,g]) #* ϕ[i,j,k]*ϕ[j,i,g]
-    #                 apprELBO += ϕ[i,j,k]*ϕ[j,i,g]*logP
-    #             end
-    #         end
-    #     end
-    # end
-
-    return apprELBO
-end
-
-
-i_region = 1
-@btime ELBO_part(ϕ[i_region], λ[:,N_s[i_region]:N_e[i_region]], ν[i_region], Σ, B, μ[:,N_s[i_region]:N_e[i_region]],  Y[i_region], K, Ns[i_region], like_var)

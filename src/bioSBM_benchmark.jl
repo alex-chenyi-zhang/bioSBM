@@ -1,10 +1,10 @@
 include("bioSBM_fns.jl")
 using BenchmarkTools
 
-n_iter = 20
+n_iter = 10
 n_runs = 2
-covariate_file_names = "data/GM12878_input_files/X_files_GM12878_chr1_100k.txt"
-map_file_names = "data/GM12878_input_files/Y_files_GM12878_chr1_100k.txt"
+covariate_file_names = "data/GM12878_input_files/X_files_GM12878_even_100k.txt"
+map_file_names = "data/GM12878_input_files/Y_files_GM12878_even_100k.txt"
 
 K = 12
 R = 0.1
@@ -70,10 +70,14 @@ println(Ns, "\t", P)
 
 
 ϕ = [ones(Ns[i_region],Ns[i_region],K) for i_region in 1:n_regions]
+
+Random.seed!(1)
+
+dirichlet_dist = Dirichlet(K, 0.5)
 for i_region in 1:n_regions
     for i in 1:Ns[i_region]
         for j in 1:Ns[i_region]
-            ϕ[i_region][i,j,:] = rand(Dirichlet(K,0.5))
+            ϕ[i_region][i, j, :] = rand(dirichlet_dist)  # Assign samples directly
         end
     end
 end

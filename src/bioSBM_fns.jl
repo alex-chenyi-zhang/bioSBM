@@ -1,6 +1,6 @@
 using Random, Distributions, StatsBase, LinearAlgebra, DelimitedFiles, Optim, LineSearches, Flux
 using JLD2  ## this is to store trained flux model to be loaded for future usage
-Random.seed!()
+Random.seed!(1)
 
 ################################################################################
 
@@ -122,7 +122,8 @@ function Estep_logitNorm!(ϕ::Array{Float64, 3}, λ, ν::Array{Float64, 3},
     for i in 1:N
         ϕ_i = sum(@view(ϕ[i,:,:]),dims=1)[1,:]
         μ_i = @view μ[:,i]
-        res = optimize(η_i -> f(η_i, ϕ_i, inv_Σ, μ_i, N), (G, η_i) -> gradf!(G,η_i, ϕ_i, inv_Σ, μ_i, N), randn(K), BFGS(linesearch = LineSearches.BackTracking(order=2)))#BFGS())
+        #res = optimize(η_i -> f(η_i, ϕ_i, inv_Σ, μ_i, N), (G, η_i) -> gradf!(G,η_i, ϕ_i, inv_Σ, μ_i, N), randn(K), BFGS(linesearch = LineSearches.BackTracking(order=2)))#BFGS())
+        res = optimize(η_i -> f(η_i, ϕ_i, inv_Σ, μ_i, N), (G, η_i) -> gradf!(G,η_i, ϕ_i, inv_Σ, μ_i, N), λ[:, i], BFGS(linesearch = LineSearches.BackTracking(order=2)))#BFGS())
         η_i = Optim.minimizer(res)
         hessf!(H, η_i, inv_Σ, μ_i, N)
         λ[:,i] .= η_i
@@ -206,8 +207,6 @@ function Mstep_blockmodel_gauss_multi!(ϕ::Vector{Array{Float64, 3}}, B::Array{F
         end
     end
 
-    #like_var[1] = lv/cum_den
-
 end
 
 
@@ -221,7 +220,7 @@ end
 
 function run_VEM_gauss_NN!(n_iterations::Int, ϕ::Vector{Array{Float64, 3}}, λ, ν::Vector{Array{Float64, 3}},
     Σ::Array{Float64, 2}, B::Array{Float64, 2}, like_var::Array{Float64, 2},
-    μ, Y::Vector{Array{Float64, 2}}, X::Array{Float64, 2}, Γ, ps, K::Int, Ns::Array{Int,1}, P::Int, n_regions::Int, R::Float64)
+    μ::Array{Float64, 2}, Y::Vector{Array{Float64, 2}}, X::Array{Float64, 2}, Γ, ps, K::Int, Ns::Array{Int,1}, P::Int, n_regions::Int, R::Float64)
 
     Ncum = 0
     N_s = ones(Int, n_regions)
@@ -244,7 +243,9 @@ function run_VEM_gauss_NN!(n_iterations::Int, ϕ::Vector{Array{Float64, 3}}, λ,
     L(a,b) = (Flux.Losses.kldivergence(softmax(Γ(a)), b))
 
     #################################
-
+    prev_loss = Inf
+    tolerance = 1e-4
+    max_flux_iters = 50
 
     for i_iter in 1:n_iterations
         inv_Σ = inv(Σ)
@@ -255,29 +256,35 @@ function run_VEM_gauss_NN!(n_iterations::Int, ϕ::Vector{Array{Float64, 3}}, λ,
             end
             Estep_logitNorm!(ϕ[i_region], @view(λ[:,N_s[i_region]:N_e[i_region]]), ν[i_region], inv_Σ, Float64.(μ[:,N_s[i_region]:N_e[i_region]]), Ns[i_region], K)
 
-            n_flux = 30
-            softmax_lamb = softmax(λ)
-            for i_flux in 1:n_flux
-                gs = gradient(()-> L(X, softmax_lamb), ps)
-                Flux.Optimise.update!(opt, ps, gs)
-            end
-
-            μ = Γ(X);
-
         end
+
+        #n_flux = 40
+        softmax_lamb = softmax(λ)
+        for i_flux in 1:max_flux_iters  #n_flux
+            gs = gradient(()-> L(X, softmax_lamb), ps)
+            Flux.Optimise.update!(opt, ps, gs)
+            current_loss = L(X, softmax_lamb)
+            rel_change = abs(current_loss - prev_loss) / abs(prev_loss)
+
+            if rel_change < tolerance
+                println("Early stopping at iteration $i_flux with relative change $rel_change")
+                break
+            end
+            prev_loss = current_loss
+        end
+
+        μ = Γ(X);
 
 
 
         RΣ = zeros(K,K)
         for i_region in 1:n_regions
             for i in 1:Ns[i_region]
-                #Σ .+= 1/(N*n_regions) * (ν[i_region][:,:,i] .+ (λ[:,i+(i_region-1)*N] .- μ[:,i+(i_region-1)*N])*(λ[:,i+(i_region-1)*N] .- μ[:,i+(i_region-1)*N])')
                 RΣ .+= (ν[i_region][:,:,i] .+ (λ[:,i+N_s[i_region]-1] .- μ[:,i+N_s[i_region]-1])*(λ[:,i+N_s[i_region]-1] .- μ[:,i+N_s[i_region]-1])')
             end
         end
         RΣ .= sqrt(8*R*RΣ/(Ncum) + Matrix(1.0I, K, K)) .- Matrix(1.0I, K, K)
         Σ .= Hermitian(RΣ/(4*R))
-        #println("\n Σ:  ", det(Σ))
         
         
         Mstep_blockmodel_gauss_multi!(ϕ, B, like_var, Y, Ns, K, n_regions)
@@ -285,7 +292,6 @@ function run_VEM_gauss_NN!(n_iterations::Int, ϕ::Vector{Array{Float64, 3}}, λ,
         if i_iter == 1 || i_iter % n_skip == 0
             for i_region in 1:n_regions
                 elbows[i_region, div(i_iter,n_skip)+1] = -R*Ns[i_region]*tr(Σ) + ELBO_gauss(ϕ[i_region], λ[:,N_s[i_region]:N_e[i_region]], ν[i_region], Σ, B, μ[:,N_s[i_region]:N_e[i_region]],  Y[i_region], K, Ns[i_region], like_var)
-                # elbows[i_region, i_iter] = 1
                 println("region: ", i_region," ELBO  \n", elbows[i_region,div(i_iter,n_skip)+1])
                 if isnan(elbows[i_region, div(i_iter,n_skip)+1])
                     break
