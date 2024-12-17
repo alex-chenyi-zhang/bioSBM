@@ -218,7 +218,7 @@ end
 #########################################################################################
 
 
-function run_VEM_gauss_NN!(n_iterations::Int, ϕ::Vector{Array{Float64, 3}}, λ, ν::Vector{Array{Float64, 3}},
+function run_VEM_gauss_NN!(max_n_iterations::Int, ϕ::Vector{Array{Float64, 3}}, λ, ν::Vector{Array{Float64, 3}},
     Σ::Array{Float64, 2}, B::Array{Float64, 2}, like_var::Array{Float64, 2},
     μ::Array{Float64, 2}, Y::Vector{Array{Float64, 2}}, X::Array{Float64, 2}, Γ, ps, K::Int, Ns::Array{Int,1}, P::Int, n_regions::Int, R::Float64)
 
@@ -233,8 +233,8 @@ function run_VEM_gauss_NN!(n_iterations::Int, ϕ::Vector{Array{Float64, 3}}, λ,
 
     ### elbows = zeros(n_regions, n_iterations)
     n_skip = 10
-    elbows = zeros(n_regions, div(n_iterations,n_skip)+1)
-    det_Sigma = zeros(n_iterations)
+    elbows = zeros(n_regions, div(max_n_iterations,n_skip)+1)
+    det_Sigma = zeros(div(max_n_iterations,n_skip)+1)
     #det_nu = [zeros(N, n_iterations) for i_reg in 1:n_regions]
     # opt = ADAM(0.01) #the value in the brackets is
     opt = Descent(0.01)
@@ -247,7 +247,11 @@ function run_VEM_gauss_NN!(n_iterations::Int, ϕ::Vector{Array{Float64, 3}}, λ,
     tolerance = 1e-4
     max_flux_iters = 50
 
-    for i_iter in 1:n_iterations
+    elbo_eps = 5e-4
+    elbo_0 = -Inf
+    finish_iter = 1
+
+    for i_iter in 1:max_n_iterations
         inv_Σ = inv(Σ)
         for i_region in 1:n_regions
             Estep_logitNorm!(ϕ[i_region], @view(λ[:,N_s[i_region]:N_e[i_region]]), ν[i_region], inv_Σ, Float64.(μ[:,N_s[i_region]:N_e[i_region]]), Ns[i_region], K)
@@ -282,6 +286,7 @@ function run_VEM_gauss_NN!(n_iterations::Int, ϕ::Vector{Array{Float64, 3}}, λ,
             for i in 1:Ns[i_region]
                 RΣ .+= (ν[i_region][:,:,i] .+ (λ[:,i+N_s[i_region]-1] .- μ[:,i+N_s[i_region]-1])*(λ[:,i+N_s[i_region]-1] .- μ[:,i+N_s[i_region]-1])')
             end
+            # println(RΣ)
         end
         RΣ .= sqrt(8*R*RΣ/(Ncum) + Matrix(1.0I, K, K)) .- Matrix(1.0I, K, K)
         Σ .= Hermitian(RΣ/(4*R))
@@ -297,10 +302,25 @@ function run_VEM_gauss_NN!(n_iterations::Int, ϕ::Vector{Array{Float64, 3}}, λ,
                     break
                 end
             end
+
+            det_Sigma[div(i_iter,n_skip)+1] = det(Σ)
+
+            current_elbo = sum(elbows[:, div(i_iter,n_skip)+1])
+            rel_change_elbo = abs(current_elbo - elbo_0) / abs(elbo_0)
+            println("Rel.chang elbo: ", rel_change_elbo, "\n")
+            println("Total elbo: ", current_elbo)
+
+
+            if rel_change_elbo < elbo_eps
+                println("VEM stoped at iteration $i_iter with relative change $rel_change_elbo")
+                break
+            end
+            elbo_0 = current_elbo
+            finish_iter = div(i_iter,n_skip)+1
         end
-        det_Sigma[i_iter] = det(Σ)
+        
     end
-    return elbows, det_Sigma #, det_nu
+    return elbows[:,1:finish_iter], det_Sigma[1:finish_iter] #, det_nu
 
 end
 

@@ -1,6 +1,6 @@
 include("bioSBM_fns.jl")
 
-function run_inference_gauss_multi_NN(n_iter::Int, n_runs::Int, covariate_file_names::String, map_file_names::String, K::Int, R::Float64)
+function run_inference_gauss_multi_NN(max_n_iter::Int, n_runs::Int, covariate_file_names::String, map_file_names::String, K::Int, R::Float64)
     io = open(covariate_file_names, "r")
     covariate_files = readdlm(io, String)
     close(io)
@@ -54,6 +54,13 @@ function run_inference_gauss_multi_NN(n_iter::Int, n_runs::Int, covariate_file_n
         close(io)
         X[:,N_starts[i_region]:N_ends[i_region]] .= X_i
         Y[i_region] .= Y_i
+
+        if any(isnan, X_i)
+            println(covariate_files[i_region], " has nans! \n")
+        end
+        if any(isnan, Y_i)
+            println(contact_map_files[i_region], " has nans! \n")
+        end
     end
     println(Ns, "\t", P)
 
@@ -125,7 +132,7 @@ function run_inference_gauss_multi_NN(n_iter::Int, n_runs::Int, covariate_file_n
         ###### end of initialization
 
         ### call to inference function
-        elbows, det_Sigma = run_VEM_gauss_NN!(n_iter, ϕ, λ, ν, Σ, B, like_var, μ, Y, X, Γ, ps, K, Ns, P, n_regions, R)
+        elbows, det_Sigma = run_VEM_gauss_NN!(max_n_iter, ϕ, λ, ν, Σ, B, like_var, μ, Y, X, Γ, ps, K, Ns, P, n_regions, R)
 
 
 
